@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { storage, type WorkoutLog } from "@/lib/storage";
 
 interface MuscleGroup {
   key: string;
@@ -27,83 +26,90 @@ function getToday(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Simplified storage functions
+function loadLog(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    return JSON.parse(localStorage.getItem("gymLog") || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveLog(log: Record<string, string>): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("gymLog", JSON.stringify(log));
+}
+
 export default function GymLogApp() {
   const [date, setDate] = useState<string>(getToday());
   const [selected, setSelected] = useState<string>("");
-  const [log, setLog] = useState<WorkoutLog>({});
+  const [log, setLog] = useState<Record<string, string>>({});
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [showInstallPrompt, setShowInstallPrompt] = useState<boolean>(false);
   const [showDataMenu, setShowDataMenu] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isMounted, setIsMounted] = useState<boolean>(false);
 
   useEffect(() => {
-    async function initializeApp() {
-      try {
-        // Initialize storage
-        await storage.init();
-        
-        // Load existing data
-        const existingLog = await storage.loadLog();
-        setLog(existingLog);
-        setSelected(existingLog[date] || "");
-      } catch (error) {
-        console.error('Failed to initialize app:', error);
-      } finally {
-        setIsLoading(false);
-      }
-    }
-
-    initializeApp();
+    setIsMounted(true);
+    const existingLog = loadLog();
+    setLog(existingLog);
+    setIsLoading(false);
     
     // Online/offline detection
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
     
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    
-    setIsOnline(navigator.onLine);
-    
-    // PWA install prompt
-    const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
-      setShowInstallPrompt(true);
-    };
-    
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    
-    // Hide install prompt if already installed
-    window.addEventListener('appinstalled', () => {
-      setShowInstallPrompt(false);
-      setDeferredPrompt(null);
-    });
+    if (typeof window !== "undefined") {
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+      setIsOnline(navigator.onLine);
+      
+      // PWA install prompt
+      const handleBeforeInstallPrompt = (e: Event) => {
+        e.preventDefault();
+        setDeferredPrompt(e as BeforeInstallPromptEvent);
+        setShowInstallPrompt(true);
+      };
+      
+      window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      
+      // Hide install prompt if already installed
+      window.addEventListener('appinstalled', () => {
+        setShowInstallPrompt(false);
+        setDeferredPrompt(null);
+      });
+    }
     
     return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      if (typeof window !== "undefined") {
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+      }
     };
   }, []);
 
   useEffect(() => {
-    setSelected(log[date] || "");
-  }, [date, log]);
+    if (isMounted) {
+      setSelected(log[date] || "");
+    }
+  }, [date, log, isMounted]);
 
   function handleSelect(groupKey: string): void {
     setSelected(groupKey);
   }
 
-  async function handleSave(): Promise<void> {
+  function handleSave(): void {
     if (!selected) return;
     const newLog = { ...log, [date]: selected };
     setLog(newLog);
-    await storage.saveLog(newLog);
+    saveLog(newLog);
     setSelected("");
     
     // Simple haptic feedback on mobile
-    if ('vibrate' in navigator) {
+    if (typeof window !== "undefined" && 'vibrate' in navigator) {
       navigator.vibrate(50);
     }
   }
@@ -124,10 +130,16 @@ export default function GymLogApp() {
     }
   };
 
-  const handleExportData = async () => {
+  const handleExportData = () => {
     try {
-      const exportData = await storage.exportData();
-      const blob = new Blob([exportData], { type: 'application/json' });
+      const exportData = {
+        version: 1,
+        exportDate: new Date().toISOString(),
+        workouts: log,
+        totalWorkouts: Object.keys(log).length
+      };
+      const dataStr = JSON.stringify(exportData, null, 2);
+      const blob = new Blob([dataStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -149,12 +161,12 @@ export default function GymLogApp() {
 
     try {
       const text = await file.text();
-      const success = await storage.importData(text);
+      const importData = JSON.parse(text);
       
-      if (success) {
-        const newLog = await storage.loadLog();
-        setLog(newLog);
-        setSelected(newLog[date] || "");
+      if (importData.workouts && typeof importData.workouts === 'object') {
+        setLog(importData.workouts);
+        saveLog(importData.workouts);
+        setSelected(importData.workouts[date] || "");
         alert('Data imported successfully!');
       } else {
         alert('Invalid backup file format.');
@@ -169,7 +181,7 @@ export default function GymLogApp() {
     setShowDataMenu(false);
   };
 
-  if (isLoading) {
+  if (isLoading || !isMounted) {
     return (
       <div className="max-w-md mx-auto mt-8 p-6 bg-white rounded-lg shadow-lg min-h-screen md:min-h-0 flex items-center justify-center">
         <div className="text-center">
@@ -314,7 +326,7 @@ export default function GymLogApp() {
 
       <div className="mt-6 pt-4 border-t border-gray-200">
         <p className="text-xs text-gray-500 text-center">
-          💾 Data stored securely with IndexedDB
+          💾 Data stored securely in your browser
           {!isOnline && " • Working offline"}
         </p>
         <p className="text-xs text-gray-400 text-center mt-1">
