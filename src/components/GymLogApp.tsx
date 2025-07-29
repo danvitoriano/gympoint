@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { storage, type WorkoutLog } from "@/lib/storage";
 
 interface MuscleGroup {
   key: string;
@@ -26,30 +27,34 @@ function getToday(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function loadLog(): Record<string, string> {
-  if (typeof window === "undefined") return {};
-  try {
-    return JSON.parse(localStorage.getItem("gymLog") || "{}");
-  } catch {
-    return {};
-  }
-}
-
-function saveLog(log: Record<string, string>): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem("gymLog", JSON.stringify(log));
-}
-
 export default function GymLogApp() {
   const [date, setDate] = useState<string>(getToday());
   const [selected, setSelected] = useState<string>("");
-  const [log, setLog] = useState<Record<string, string>>({});
+  const [log, setLog] = useState<WorkoutLog>({});
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [showInstallPrompt, setShowInstallPrompt] = useState<boolean>(false);
+  const [showDataMenu, setShowDataMenu] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    setLog(loadLog());
+    async function initializeApp() {
+      try {
+        // Initialize storage
+        await storage.init();
+        
+        // Load existing data
+        const existingLog = await storage.loadLog();
+        setLog(existingLog);
+        setSelected(existingLog[date] || "");
+      } catch (error) {
+        console.error('Failed to initialize app:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    initializeApp();
     
     // Online/offline detection
     const handleOnline = () => setIsOnline(true);
@@ -90,11 +95,11 @@ export default function GymLogApp() {
     setSelected(groupKey);
   }
 
-  function handleSave(): void {
+  async function handleSave(): Promise<void> {
     if (!selected) return;
     const newLog = { ...log, [date]: selected };
     setLog(newLog);
-    saveLog(newLog);
+    await storage.saveLog(newLog);
     setSelected("");
     
     // Simple haptic feedback on mobile
@@ -119,12 +124,68 @@ export default function GymLogApp() {
     }
   };
 
+  const handleExportData = async () => {
+    try {
+      const exportData = await storage.exportData();
+      const blob = new Blob([exportData], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `gym-log-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setShowDataMenu(false);
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('Export failed. Please try again.');
+    }
+  };
+
+  const handleImportData = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const success = await storage.importData(text);
+      
+      if (success) {
+        const newLog = await storage.loadLog();
+        setLog(newLog);
+        setSelected(newLog[date] || "");
+        alert('Data imported successfully!');
+      } else {
+        alert('Invalid backup file format.');
+      }
+    } catch (error) {
+      console.error('Import failed:', error);
+      alert('Import failed. Please check the file format.');
+    }
+    
+    // Reset file input
+    event.target.value = '';
+    setShowDataMenu(false);
+  };
+
+  if (isLoading) {
+    return (
+      <div className="max-w-md mx-auto mt-8 p-6 bg-white rounded-lg shadow-lg min-h-screen md:min-h-0 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-gray-500">Loading your workouts...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-md mx-auto mt-8 p-6 bg-white rounded-lg shadow-lg min-h-screen md:min-h-0">
       {/* Offline indicator */}
       {!isOnline && (
         <div className="mb-4 p-3 bg-yellow-100 border border-yellow-400 text-yellow-700 rounded-md">
-                     📱 You&apos;re offline, but the app still works! Data will sync when you&apos;re back online.
+          📱 You&apos;re offline, but the app still works! Data will sync when you&apos;re back online.
         </div>
       )}
       
@@ -151,7 +212,45 @@ export default function GymLogApp() {
         </div>
       )}
 
-      <h2 className="text-2xl font-bold text-gray-800 mb-6">Gym Training Log</h2>
+      {/* Header with data menu */}
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold text-gray-800">Gym Training Log</h2>
+        <div className="relative">
+          <button
+            onClick={() => setShowDataMenu(!showDataMenu)}
+            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full"
+            title="Data options"
+          >
+            ⚙️
+          </button>
+          
+          {showDataMenu && (
+            <div className="absolute right-0 mt-2 w-48 bg-white border border-gray-200 rounded-md shadow-lg z-10">
+              <button
+                onClick={handleExportData}
+                className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+              >
+                📤 Export Data
+              </button>
+              <label className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">
+                📥 Import Data
+                <input
+                  type="file"
+                  accept=".json"
+                  onChange={handleImportData}
+                  className="hidden"
+                />
+              </label>
+              <button
+                onClick={() => setShowDataMenu(false)}
+                className="block w-full text-left px-4 py-2 text-sm text-gray-500 hover:bg-gray-100 border-t border-gray-100"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
       
       <div className="mb-6">
         <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -215,8 +314,11 @@ export default function GymLogApp() {
 
       <div className="mt-6 pt-4 border-t border-gray-200">
         <p className="text-xs text-gray-500 text-center">
-          💾 Data is stored locally in your browser
+          💾 Data stored securely with IndexedDB
           {!isOnline && " • Working offline"}
+        </p>
+        <p className="text-xs text-gray-400 text-center mt-1">
+          {Object.keys(log).length} workouts logged • Use ⚙️ to backup data
         </p>
         {showInstallPrompt && (
           <p className="text-xs text-blue-600 text-center mt-1">
